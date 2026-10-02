@@ -24,10 +24,6 @@ jobs:
             binfmt-support crossbuild-essential-arm64 libncurses-dev bison flex libssl-dev libelf-dev \
             fdisk dosfstools squashfs-tools bc arch-install-scripts wget
 
-      - name: Clone Ubuntu Seeds Source
-        run: |
-          git clone --depth 1 https://launchpad.net ubuntu-seeds
-
       - name: Compile Mainline Linux Kernel 7.2 (ARM64 with RKVDEC Patches)
         run: |
           git clone --depth 1 --branch linux-7.2.y https://kernel.org linux-7.2
@@ -39,13 +35,13 @@ jobs:
           # --- Загрузка и применение патчей для аппаратного декодера видео rkvdec ---
           echo "Загрузка медиа-патчей из репозитория Minimyth2..."
           mkdir -p ../kernel_patches
-          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3559-media-rkvdec-fix-PM-runtime-teardown-ordering-in-remove.patch
-          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3569-media-rkvdec-prime-VDPU383-deblock-warmup-rk3576.patch
-          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3570-media-rkvdec-add-VP9-VDPU381-decoder-support.patch
-          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3571-media-rkvdec-vp9-fix-altref-vscale-and-segmap-size-for-2K-decode.patch
-          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3572-media-rkvdec-vdpu381-add-VP9-profile-2-10bit-support.patch
-          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3573-media-rkvdec-vdpu381-vp9-use-the-real-buffer-stride.patch
-          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3574-media-rkvdec-Add-support-for-the-VDPU346-variant.patch
+          wget -P ../kernel_patches/ https://githubusercontent.com
+          wget -P ../kernel_patches/ https://githubusercontent.com
+          wget -P ../kernel_patches/ https://githubusercontent.com
+          wget -P ../kernel_patches/ https://githubusercontent.com
+          wget -P ../kernel_patches/ https://githubusercontent.com
+          wget -P ../kernel_patches/ https://githubusercontent.com
+          wget -P ../kernel_patches/ https://githubusercontent.com
           
           echo "Применение патчей..."
           for patch in ../kernel_patches/*.patch; do
@@ -132,14 +128,14 @@ jobs:
           scripts/config --enable CONFIG_PHYLIB
           scripts/config --enable CONFIG_REALTEK_PHY
 
-          
           make -j$(nproc) Image modules dtbs
           cd ..
 
       - name: Bootstrap Ubuntu 26.04 RootFS
         run: |
           sudo mkdir -p rootfs
-          sudo debootstrap --arch=arm64 resolute rootfs http://ubuntu.com
+          # Используем правильное зеркало для ARM64 архитектур
+          sudo debootstrap --arch=arm64 plucky rootfs http://ubuntu.com
 
       - name: Inject Kernel and Modules to RootFS
         run: |
@@ -196,82 +192,75 @@ jobs:
           cat << 'UDEV' > /etc/udev/rules.d/60-scheduler.rules
           ACTION=="add|change", KERNEL=="mmcblk*", ATTR{queue/scheduler}="kyber"
           ACTION=="add|change", KERNEL=="nvme*", ATTR{queue/scheduler}="none"
-          UDEV
-          
-          cat << 'SYSCTL' >> /etc/sysctl.conf
-          vm.swappiness = 10
-          vm.vfs_cache_pressure = 50
-          vm.dirty_background_ratio = 5
-          vm.dirty_ratio = 10
-          SYSCTL
-
-          # --- Скрипт автоматического расширения SD-карты ---
-          cat << 'RESIZE_SCRIPT' > /usr/local/bin/resize-rootfs.sh
-          #!/bin/bash
-          ROOT_DEV=$(findmnt -n -o SOURCE /)
-          DISK_DEV=$(lsblk -no pkname $ROOT_DEV)
-          PART_NUM=$(echo $ROOT_DEV | grep -o '[0-8]$')
-          [ -z "$DISK_DEV" ] && DISK_DEV=$(echo $ROOT_DEV | sed -r 's/p[0-9]+$//') || DISK_DEV="/dev/$DISK_DEV"
-          growpart $DISK_DEV $PART_NUM
-          partx -u $ROOT_DEV
-          resize2fs $ROOT_DEV
-          systemctl disable resize-rootfs.service
-          rm -f /etc/systemd/system/resize-rootfs.service /usr/local/bin/resize-rootfs.sh
-          RESIZE_SCRIPT
-          chmod +x /usr/local/bin/resize-rootfs.sh
-
-          # --- Служба Systemd для однократного запуска скрипта ---
-          cat << 'SYSTEMD_UNIT' > /etc/systemd/system/resize-rootfs.service
-          [Unit]
-          Description=Auto resize root filesystem on first boot
-          Before=basic.target
-          After=local-fs.target
-          DefaultDependencies=no
-          [Service]
-          Type=oneshot
-          ExecStart=/usr/local/bin/resize-rootfs.sh
-          RemainAfterExit=yes
-          [Install]
-          WantedBy=multi-user.target
-          SYSTEMD_UNIT
-          systemctl enable resize-rootfs.service
-          
-          # Установка GRUB EFI на съемный путь загрузки UEFI
-          grub-install --target=arm64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --removable --no-nvram
-          
-          # Генерация стабильного grub.cfg с флагами для SD-карты
-          cat << 'GRUB_CFG' > /boot/grub/grub.cfg
-          set default="0"
-          set timeout="3"
-          menuentry "Ubuntu 26.04 LTS (Launchpad Seeds, Linux 7.2 Mainline patched)" {
-              insmod gzio
-              insmod part_gpt
-              insmod ext2
-              set root='hd0,gpt2'
-              echo "Loading Linux 7.2 with video-patches from SD-Card..."
-	            echo "Loading Device Tree for NanoPC-T6..."
-              devicetree /boot/rk3588-nanopc-t6.dtb
-          }
-           GRUB_CFG
-          update-grub
-         EOF
-
-          # Настоящее и корректное закрытие chroot окружения
-          sudo umount mnt_root/dev
-          sudo umount mnt_root/proc
-          sudo umount mnt_root/sys
-
-      - name: Finalize, Compress and Format Image
-        run: |
-          sudo umount mnt_root/boot/efi
-          sudo umount mnt_root
-          sudo losetup -d ${{ env.LOOP_DEV }}
-          xz -9 ubuntu-26.04-nanopc-t6-sd.img
-
-       - name: Upload Finished Image Artifact
-         uses: actions/upload-artifact@v4
-           with:
-            name: ubuntu-26.04-uefi-sdcard-autosize
-            path: ubuntu-26.04-nanopc-t6-sd.img.xz
-            retention-days: 7
- 
+UDEV
+cat << 'SYSCTL' >> /etc/sysctl.conf
+vm.swappiness = 10
+vm.vfs_cache_pressure = 50
+vm.dirty_background_ratio = 5
+vm.dirty_ratio = 10
+SYSCTL
+# --- Скрипт автоматического расширения SD-карты ---
+cat << 'RESIZE_SCRIPT' > /usr/local/bin/resize-rootfs.sh
+#!/bin/bash
+ROOT_DEV=$(findmnt -n -o SOURCE /)
+DISK_DEV=$(lsblk -no pkname $ROOT_DEV)
+PART_NUM=$(echo $ROOT_DEV | grep -o '[0-8]$')
+[ -z "$DISK_DEV" ] && DISK_DEV=$(echo $ROOT_DEV | sed -r 's/p[0-9]+$//') || DISK_DEV="/dev/$DISK_DEV"
+growpart $DISK_DEV $PART_NUM
+partx -u $ROOT_DEV
+resize2fs $ROOT_DEV
+systemctl disable resize-rootfs.service
+rm -f /etc/systemd/system/resize-rootfs.service /usr/local/bin/resize-rootfs.sh
+RESIZE_SCRIPT
+chmod +x /usr/local/bin/resize-rootfs.sh
+# --- Служба Systemd для однократного запуска скрипта ---
+cat << 'SYSTEMD_UNIT' > /etc/systemd/system/resize-rootfs.service
+[Unit]
+Description=Auto resize root filesystem on first boot
+Before=basic.target
+After=local-fs.target
+DefaultDependencies=no
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/resize-rootfs.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+SYSTEMD_UNIT
+systemctl enable resize-rootfs.service
+# Установка GRUB EFI на съемный путь загрузки UEFI
+grub-install --target=arm64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --removable --no-nvram
+# Генерация стабильного grub.cfg с флагами для SD-карты и выводом консоли RK3588
+mkdir -p /boot/grub
+cat << 'GRUB_CFG' > /boot/grub/grub.cfg
+set default="0"
+set timeout="3"
+menuentry "Ubuntu 26.04 LTS (Linux 7.2 Mainline patched)" {
+insmod gzio
+insmod part_gpt
+insmod ext2
+set root='hd0,gpt2'
+echo "Loading Linux 7.2 with video-patches..."
+linux /boot/vmlinuz-7.2-mainline root=UUID=${{ env.ROOT_UUID }} rw rootwait console=ttyFIQ0,115200n8 console=tty1 loglevel=7
+echo "Loading Device Tree for NanoPC-T6..."
+devicetree /boot/rk3588-nanopc-t6.dtb
+}
+GRUB_CFG
+EOF
+# Размонтирование chroot окружения (вынесено наружу блока chroot для безопасности)
+sudo umount mnt_root/dev
+sudo umount mnt_root/proc
+sudo umount mnt_root/sys
+- name: Finalize, Compress and Format Image
+run: |
+sudo umount mnt_root/boot/efi
+sudo umount mnt_root
+sudo losetup -d ${{ env.LOOP_DEV }}
+# Быстрое и эффективное сжатие во избежание OOM/Timeout на раннере
+xz -T0 -3 ubuntu-26.04-nanopc-t6-sd.img
+- name: Upload Finished Image Artifact
+uses: actions/upload-artifact@v4
+with:
+name: ubuntu-26.04-uefi-sdcard-autosize
+path: ubuntu-26.04-nanopc-t6-sd.img.xz
+retention-days: 7
