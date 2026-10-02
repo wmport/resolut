@@ -1,36 +1,277 @@
-# This is a basic workflow to help you get started with Actions
+name: Build NanoPC-T6 Ubuntu 26.04 patched SD-Card GPT Image
 
-name: CI
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
+  push:
+    branches: [ main ]
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
   build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    runs-on: ubuntu-24.04
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Free Disk Space
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc "/usr/local/share/boost"
+          sudo docker image prune --all --force
+
+      - name: Install Build Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git build-essential debootstrap qemu-user-static \
+            binfmt-support crossbuild-essential-arm64 libncurses-dev bison flex libssl-dev libelf-dev \
+            fdisk dosfstools squashfs-tools bc arch-install-scripts wget
+
+      - name: Clone Ubuntu Seeds Source
+        run: |
+          git clone --depth 1 https://launchpad.net ubuntu-seeds
+
+      - name: Compile Mainline Linux Kernel 7.2 (ARM64 with RKVDEC Patches)
+        run: |
+          git clone --depth 1 --branch linux-7.2.y https://kernel.org linux-7.2
+          cd linux-7.2
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          make defconfig
+          
+          # --- Загрузка и применение патчей для аппаратного декодера видео rkvdec ---
+          echo "Загрузка медиа-патчей из репозитория Minimyth2..."
+          mkdir -p ../kernel_patches
+          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3559-media-rkvdec-fix-PM-runtime-teardown-ordering-in-remove.patch
+          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3569-media-rkvdec-prime-VDPU383-deblock-warmup-rk3576.patch
+          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3570-media-rkvdec-add-VP9-VDPU381-decoder-support.patch
+          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3571-media-rkvdec-vp9-fix-altref-vscale-and-segmap-size-for-2K-decode.patch
+          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3572-media-rkvdec-vdpu381-add-VP9-profile-2-10bit-support.patch
+          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3573-media-rkvdec-vdpu381-vp9-use-the-real-buffer-stride.patch
+          wget -P ../kernel_patches/ https://raw.githubusercontent.com/warpme/minimyth2/refs/heads/master/script/kernel/linux-7.2/files/3574-media-rkvdec-Add-support-for-the-VDPU346-variant.patch
+          
+          echo "Применение патчей..."
+          for patch in ../kernel_patches/*.patch; do
+            echo "Применяем: $patch"
+            patch -p1 < "$patch"
+          done
+          
+          # UEFI & GPT Options
+          scripts/config --enable CONFIG_EFI
+          scripts/config --enable CONFIG_EFI_STUB
+          scripts/config --enable CONFIG_EFI_VARS
+          scripts/config --enable CONFIG_PARTITION_ADVANCED
+          scripts/config --enable CONFIG_EFI_PARTITION
+          
+          # SoC RK3588 Base & Power Options
+          scripts/config --enable CONFIG_ARCH_ROCKCHIP
+          scripts/config --enable CONFIG_ARM_ROCKCHIP_CPUFREQ
+          scripts/config --enable CONFIG_ROCKCHIP_THERMAL
+          scripts/config --enable CONFIG_PWM_ROCKCHIP
+          scripts/config --enable CONFIG_COMMON_CLK_ROCKCHIP
+          scripts/config --enable CONFIG_REGULATOR_FAN53555
+          
+          # Активация подсистемы V4L2 и видеодекодеров Rockchip
+          scripts/config --enable CONFIG_MEDIA_SUPPORT
+          scripts/config --enable CONFIG_MEDIA_CONTROLLER
+          scripts/config --enable CONFIG_VIDEO_DEV
+          scripts/config --enable CONFIG_MEDIA_STATELESS_SUPPORT
+          scripts/config --enable CONFIG_VIDEO_ROCKCHIP_RKVDEC
+          
+          # Monolithic Drivers for MicroSD Boot (No modules here)
+          scripts/config --enable CONFIG_MMC
+          scripts/config --enable CONFIG_MMC_BLOCK
+          scripts/config --enable CONFIG_MMC_DW
+          scripts/config --enable CONFIG_MMC_DW_ROCKCHIP
+          scripts/config --enable CONFIG_MMC_SDHCI
+          scripts/config --enable CONFIG_MMC_SDHCI_PLTFM
+          scripts/config --enable CONFIG_MMC_SDHCI_OF_DWCMSHC
+          scripts/config --enable CONFIG_NVME_CORE
+          scripts/config --enable CONFIG_NVME
+         
+          # ====================================================================
+          # ДРАЙВЕРЫ ПОДДЕРЖКИ REALTEK RTL8822CE (Wi-Fi / BT)
+          # ====================================================================
+          scripts/config --enable CONFIG_NETDEVICES
+          scripts/config --enable CONFIG_WLAN
+          scripts/config --enable CONFIG_WLAN_VENDOR_REALTEK
+          scripts/config --enable CONFIG_MAC80211
+          scripts/config --enable CONFIG_CFG80211
+          scripts/config --enable CONFIG_RTW88
+          scripts/config --enable CONFIG_RTW88_CORE
+          scripts/config --enable CONFIG_RTW88_PCI
+          scripts/config --enable CONFIG_RTW88_8822ce
+          # Поддержка Bluetooth-части модуля через USB шину M.2
+          scripts/config --enable CONFIG_BT
+          scripts/config --enable CONFIG_BT_HCIBTUSB
+          scripts/config --enable CONFIG_BT_HCIBTUSB_RTL
+          
+          # ====================================================================
+          # ДРАЙВЕРЫ ПОДДЕРЖКИ МОДЕМА TELIT LM960 (4G/LTE)
+          # ====================================================================
+          scripts/config --enable CONFIG_USB_NET_DRIVERS
+          scripts/config --enable CONFIG_USB_USBNET
+          scripts/config --enable CONFIG_USB_NET_CDCETHER
+          scripts/config --enable CONFIG_USB_NET_CDC_NCM
+          scripts/config --enable CONFIG_USB_NET_CDC_MBIM
+          scripts/config --enable CONFIG_USB_NET_QMI_WWAN
+          scripts/config --enable CONFIG_USB_SERIAL
+          scripts/config --enable CONFIG_USB_SERIAL_WWAN
+          scripts/config --enable CONFIG_USB_SERIAL_OPTION
+          scripts/config --enable CONFIG_PPP
+          
+          # ====================================================================
+          # ДРАЙВЕРЫ ВСТРОЕННЫХ СЕТЕВЫХ ПОРТОВ 2.5Gb ETHERNET (RTL8125BG)
+          # ====================================================================
+          scripts/config --enable CONFIG_NET_CORE
+          scripts/config --enable CONFIG_ETHERNET
+          scripts/config --enable CONFIG_NET_VENDOR_REALTEK
+          scripts/config --enable CONFIG_R8169
+          scripts/config --enable CONFIG_NET_VENDOR_SYNOPSYS
+          scripts/config --enable CONFIG_STMMAC_ETH
+          scripts/config --enable CONFIG_STMMAC_PLATFORM
+          scripts/config --enable CONFIG_DWMAC_ROCKCHIP
+          scripts/config --enable CONFIG_MDIO_DEVICE
+          scripts/config --enable CONFIG_PHYLIB
+          scripts/config --enable CONFIG_REALTEK_PHY
+
+          
+          make -j$(nproc) Image modules dtbs
+          cd ..
+
+      - name: Bootstrap Ubuntu 26.04 RootFS
+        run: |
+          sudo mkdir -p rootfs
+          sudo debootstrap --arch=arm64 resolute rootfs http://ubuntu.com
+
+      - name: Inject Kernel and Modules to RootFS
+        run: |
+          sudo mkdir -p rootfs/boot/efi
+          sudo cp linux-7.2/arch/arm64/boot/Image rootfs/boot/vmlinuz-7.2-mainline
+          sudo cp linux-7.2/arch/arm64/boot/dts/rockchip/rk3588-nanopc-t6.dtb rootfs/boot/rk3588-nanopc-t6.dtb
+          cd linux-7.2
+          sudo make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=../rootfs modules_install
+          cd ..
+
+      - name: Generate GPT Disk Image and Mount Structure
+        run: |
+          dd if=/dev/zero of=ubuntu-26.04-nanopc-t6-sd.img bs=1M count=5120
+          sudo losetup -P -f ubuntu-26.04-nanopc-t6-sd.img
+          LOOP_DEV=$(losetup -j ubuntu-26.04-nanopc-t6-sd.img | cut -d: -f1)
+          
+          sudo parted -s $LOOP_DEV mklabel gpt
+          sudo parted -s $LOOP_DEV mkpart ESP fat32 1MiB 512MiB
+          sudo parted -s $LOOP_DEV set 1 esp on
+          sudo parted -s $LOOP_DEV mkpart root ext4 512MiB 100%
+          
+          sudo mkfs.vfat -F 32 ${LOOP_DEV}p1
+          sudo mkfs.ext4 -F ${LOOP_DEV}p2
+          
+          EFI_UUID=$(sudo blkid -s UUID -o value ${LOOP_DEV}p1)
+          ROOT_UUID=$(sudo blkid -s UUID -o value ${LOOP_DEV}p2)
+          echo "EFI_UUID=${EFI_UUID}" >> $GITHUB_ENV
+          echo "ROOT_UUID=${ROOT_UUID}" >> $GITHUB_ENV
+          echo "LOOP_DEV=${LOOP_DEV}" >> $GITHUB_ENV
+          
+          mkdir -p mnt_root
+          sudo mount ${LOOP_DEV}p2 mnt_root
+          sudo mkdir -p mnt_root/boot/efi
+          sudo mount ${LOOP_DEV}p1 mnt_root/boot/efi
+          sudo cp -a rootfs/. mnt_root/
+
+      - name: Configure System Tweaks, Auto-Resize & GRUB EFI (chroot)
+        run: |
+          echo "UUID=${{ env.ROOT_UUID }} / ext4 defaults,noatime,errors=remount-ro 0 1" | sudo tee mnt_root/etc/fstab
+          echo "UUID=${{ env.EFI_UUID }} /boot/efi vfat defaults 0 2" | sudo tee -a mnt_root/etc/fstab
+          
+          sudo cp /usr/bin/qemu-aarch64-static mnt_root/usr/bin/
+          sudo mount --bind /dev mnt_root/dev
+          sudo mount --bind /proc mnt_root/proc
+          sudo mount --bind /sys mnt_root/sys
+          
+          cat << 'EOF' | sudo chroot mnt_root /bin/bash
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends grub-efi-arm64 grub-efi-arm64-bin efi-ibft efibootmgr linux-firmware irqbalance cloud-guest-utils fdisk openssh-server
+          
+          echo 'IRQBALANCE_ARGS="--deepestcache=2"' > /etc/default/irqbalance
+          
+          cat << 'UDEV' > /etc/udev/rules.d/60-scheduler.rules
+          ACTION=="add|change", KERNEL=="mmcblk*", ATTR{queue/scheduler}="kyber"
+          ACTION=="add|change", KERNEL=="nvme*", ATTR{queue/scheduler}="none"
+          UDEV
+          
+          cat << 'SYSCTL' >> /etc/sysctl.conf
+          vm.swappiness = 10
+          vm.vfs_cache_pressure = 50
+          vm.dirty_background_ratio = 5
+          vm.dirty_ratio = 10
+          SYSCTL
+
+          # --- Скрипт автоматического расширения SD-карты ---
+          cat << 'RESIZE_SCRIPT' > /usr/local/bin/resize-rootfs.sh
+          #!/bin/bash
+          ROOT_DEV=$(findmnt -n -o SOURCE /)
+          DISK_DEV=$(lsblk -no pkname $ROOT_DEV)
+          PART_NUM=$(echo $ROOT_DEV | grep -o '[0-8]$')
+          [ -z "$DISK_DEV" ] && DISK_DEV=$(echo $ROOT_DEV | sed -r 's/p[0-9]+$//') || DISK_DEV="/dev/$DISK_DEV"
+          growpart $DISK_DEV $PART_NUM
+          partx -u $ROOT_DEV
+          resize2fs $ROOT_DEV
+          systemctl disable resize-rootfs.service
+          rm -f /etc/systemd/system/resize-rootfs.service /usr/local/bin/resize-rootfs.sh
+          RESIZE_SCRIPT
+          chmod +x /usr/local/bin/resize-rootfs.sh
+
+          # --- Служба Systemd для однократного запуска скрипта ---
+          cat << 'SYSTEMD_UNIT' > /etc/systemd/system/resize-rootfs.service
+          [Unit]
+          Description=Auto resize root filesystem on first boot
+          Before=basic.target
+          After=local-fs.target
+          DefaultDependencies=no
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/bin/resize-rootfs.sh
+          RemainAfterExit=yes
+          [Install]
+          WantedBy=multi-user.target
+          SYSTEMD_UNIT
+          systemctl enable resize-rootfs.service
+          
+          # Установка GRUB EFI на съемный путь загрузки UEFI
+          grub-install --target=arm64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --removable --no-nvram
+          
+          # Генерация стабильного grub.cfg с флагами для SD-карты
+          cat << 'GRUB_CFG' > /boot/grub/grub.cfg
+          set default="0"
+          set timeout="3"
+          menuentry "Ubuntu 26.04 LTS (Launchpad Seeds, Linux 7.2 Mainline patched)" {
+              insmod gzio
+              insmod part_gpt
+              insmod ext2
+              set root='hd0,gpt2'
+              echo "Loading Linux 7.2 with video-patches from SD-Card..."
+	            echo "Loading Device Tree for NanoPC-T6..."
+              devicetree /boot/rk3588-nanopc-t6.dtb
+          }
+           GRUB_CFG
+          update-grub
+         EOF
+
+          # Настоящее и корректное закрытие chroot окружения
+          sudo umount mnt_root/dev
+          sudo umount mnt_root/proc
+          sudo umount mnt_root/sys
+
+      - name: Finalize, Compress and Format Image
+        run: |
+          sudo umount mnt_root/boot/efi
+          sudo umount mnt_root
+          sudo losetup -d ${{ env.LOOP_DEV }}
+          xz -9 ubuntu-26.04-nanopc-t6-sd.img
+
+       - name: Upload Finished Image Artifact
+         uses: actions/upload-artifact@v4
+           with:
+            name: ubuntu-26.04-uefi-sdcard-autosize
+            path: ubuntu-26.04-nanopc-t6-sd.img.xz
+            retention-days: 7
+ 
