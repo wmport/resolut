@@ -132,7 +132,7 @@ jobs:
           cd linux-7.2
           sudo make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=../rootfs modules_install
           cd ..
-      - name: Generate GPT Disk Image and Mount Structure
+            - name: Generate GPT Disk Image and Mount Structure
         run: |
           dd if=/dev/zero of=ubuntu-26.04-nanopc-t6-sd.img bs=1M count=5120
           sudo losetup -P -f ubuntu-26.04-nanopc-t6-sd.img
@@ -189,58 +189,63 @@ UDEV
           vm.dirty_ratio = 10
 SYSCTL
 
-          # --- Скрипт автоматического расширения SD-карты ---
+          # --- Скрипт автоматического расширения SD-карты при первой загрузке ---
           cat << 'RESIZE_SCRIPT' > /usr/local/bin/resize-rootfs.sh
 #!/bin/bash
-ROOT_DEV=$(findmnt -n -o SOURCE /)
-DISK_DEV=$(lsblk -no pkname $ROOT_DEV)
-PART_NUM=$(echo $ROOT_DEV | grep -o '[0-8]$')
-[ -z "$DISK_DEV" ] && DISK_DEV=$(echo $ROOT_DEV | sed -r 's/p[0-9]+$//') || DISK_DEV="/dev/$DISK_DEV"
-growpart $DISK_DEV $PART_NUM
-partx -u $ROOT_DEV
-resize2fs $ROOT_DEV
+ROOT_DEV=\$(findmnt -n -o SOURCE /)
+DISK_DEV=\$(lsblk -no pkname \$ROOT_DEV)
+PART_NUM=\$(echo \$ROOT_DEV | grep -o '[0-8]\$')
+[ -z "\$DISK_DEV" ] && DISK_DEV=\$(echo \$ROOT_DEV | sed -r 's/p[0-9]+\$//') || DISK_DEV="/dev/\$DISK_DEV"
+growpart \$DISK_DEV \$PART_NUM
+partx -u \$ROOT_DEV
+resize2fs \$ROOT_DEV
 systemctl disable resize-rootfs.service
 rm -f /etc/systemd/system/resize-rootfs.service /usr/local/bin/resize-rootfs.sh
 RESIZE_SCRIPT
 
           chmod +x /usr/local/bin/resize-rootfs.sh
           
-          # --- Служба Systemd для однократного запуска скрипта ---
+          # --- Системная служба для resize-скрипта ---
           cat << 'SYSTEMD_UNIT' > /etc/systemd/system/resize-rootfs.service
 [Unit]
 Description=Auto resize root filesystem on first boot
 Before=basic.target
 After=local-fs.target
 DefaultDependencies=no
+
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/resize-rootfs.sh
 RemainAfterExit=yes
+
 [Install]
 WantedBy=multi-user.target
 SYSTEMD_UNIT
 
           systemctl enable resize-rootfs.service
           
+          # Установка GRUB EFI на съемный носитель
           grub-install --target=arm64-efi --efi-directory=/boot/efi --bootloader-id=ubuntu --removable --no-nvram
           
+          # Генерация загрузочного меню GRUB
           mkdir -p /boot/grub
           cat << GRUB_CFG > /boot/grub/grub.cfg
 set default="0"
 set timeout="3"
 menuentry "Ubuntu 26.04 LTS (Linux 7.2 Mainline patched)" {
-insmod gzio
-insmod part_gpt
-insmod ext2
-set root='hd0,gpt2'
-echo "Loading Linux 7.2 with video-patches..."
-linux /boot/vmlinuz-7.2-mainline root=UUID=${TARGET_ROOT_UUID} rw rootwait console=ttyFIQ0,115200n8 console=tty1 loglevel=7
-echo "Loading Device Tree for NanoPC-T6..."
-devicetree /boot/rk3588-nanopc-t6.dtb
+    insmod gzio
+    insmod part_gpt
+    insmod ext2
+    set root='hd0,gpt2'
+    echo "Loading Linux 7.2 with video-patches..."
+    linux /boot/vmlinuz-7.2-mainline root=UUID=${TARGET_ROOT_UUID} rw rootwait console=ttyFIQ0,115200n8 console=tty1 loglevel=7
+    echo "Loading Device Tree for NanoPC-T6..."
+    devicetree /boot/rk3588-nanopc-t6.dtb
 }
 GRUB_CFG
 EOF
 
+          # Корректный выход и размонтирование виртуальных директорий
           sudo umount mnt_root/dev
           sudo umount mnt_root/proc
           sudo umount mnt_root/sys
@@ -250,6 +255,7 @@ EOF
           sudo umount mnt_root/boot/efi
           sudo umount mnt_root
           sudo losetup -d ${{ env.LOOP_DEV }}
+          # Эффективное многопоточное xz-сжатие готового .img файла
           xz -T0 -3 ubuntu-26.04-nanopc-t6-sd.img
 
       - name: Upload Finished Image Artifact
